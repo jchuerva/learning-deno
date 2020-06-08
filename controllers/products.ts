@@ -1,58 +1,88 @@
 // import interfaces
 import { Product } from '../types.ts'
-import { v4 } from 'https://deno.land/std/uuid/mod.ts'
+import { Client } from '../dependencies.ts'
+import { dbCreds } from '../config.ts'
 
-// fix data right now
-let products: Product[] = [
-  {
-    id: "1",
-    name: "Product One",
-    description: "This is product one",
-    price: 29.99,
-  },
-  {
-    id: "2",
-    name: "Product Two",
-    description: "This is product two",
-    price: 39.99,
-  },
-  {
-    id: "3",
-    name: "Product Three",
-    description: "This is product three",
-    price: 59.99,
-  },
-];
+// init client
+const client = new Client(dbCreds)
 
 // functions
 
 // @desc    Get all products
 // @route   GET /api/v1/products
-const getProducts = ({ response }: { response: any }) => {
-  response.body = {
-    success: true,
-    data: products
+const getProducts = async ({ response }: { response: any }) => {
+  try {
+    await client.connect()
+
+    const result = await client.query("SELECT * FROM products")
+    // result gives a weird strtucture, so we have to format it
+    // console.log(result)
+
+    const products = new Array()
+    result.rows.map(p => {
+      let obj: any = new Object()
+
+      result.rowDescription.columns.map((elm, i) => {
+        obj[elm.name] = p[i]
+      })
+
+      products.push(obj)
+    })
+
+    response.status = 200
+    response.body = {
+      success: true,
+      data: products
+    }
+
+  } catch (err) {
+    response.status = 500
+    response.body = {
+      success: false,
+      msg: err.toString()
+    }
+  } finally {
+    await client.end()
   }
 }
 
 // @desc    Get single product
 // @route   GET /api/v1/products/:id
-const getProduct = ({ params, response }: { params: { id: string }, response: any }) => {
-  // response.body = 'get' // simple test of the end-point
-  const product: Product | undefined = products.find(p => p.id === params.id)
+const getProduct = async ({ params, response }: { params: { id: string }, response: any }) => {
 
-  if (product) {
-    response.status = 200
-    response.body = {
-      success: true,
-      data: product
+  try {
+    await client.connect()
+
+    const result = await client.query("SELECT * FROM products WHERE id =$1", params.id)
+
+    if (result.rows.toString() == "") {
+      response.status = 404 // not found
+      response.body = {
+        success: false,
+        msg: `No product with the id of ${params.id}`
+      }
+      return;
+    } else {
+      const product: any = new Object()
+
+      result.rows.map(p => {
+        result.rowDescription.columns.map((elm, i) => {
+          product[elm.name] = p[i]
+        })
+      })
+      response.body = {
+        success: true,
+        data: product
+      }
     }
-  } else {
-    response.status = 404
+  } catch (err) {
+    response.status = 500
     response.body = {
       success: false,
-      msg: 'No product found'
+      msg: err.toString()
     }
+  } finally {
+    await client.end()
   }
 }
 
@@ -62,6 +92,7 @@ const getProduct = ({ params, response }: { params: { id: string }, response: an
 const addProduct = async ({ request, response }: { request: any, response: any }) => {
   // response.body = 'add'
   const body = await request.body()
+  const product = body.value
 
   if (!request.hasBody) {
     response.status = 400
@@ -70,13 +101,26 @@ const addProduct = async ({ request, response }: { request: any, response: any }
       msg: 'No data'
     }
   } else {
-    const product: Product = body.value
-    product.id = v4.generate()
-    products.push(product)
-    response.status = 202
-    response.body = {
-      success: true,
-      data: product
+    try {
+      await client.connect()
+      const result = await client.query("INSERT INTO products(name,description,price) VALUES($1,$2,$3)",
+        product.name,
+        product.description,
+        product.price)
+
+      response.status = 201
+      response.body = {
+        success: true,
+        data: product
+      }
+    } catch (err) {
+      response.status = 500 // server error
+      response.body = {
+        success: false,
+        msg: err.toString()
+      }
+    } finally {
+      await client.end()
     }
   }
 
@@ -85,37 +129,88 @@ const addProduct = async ({ request, response }: { request: any, response: any }
 // @desc    Update product
 // @route   PUT /api/v1/products/:id
 const updateProduct = async ({ params, request, response }: { params: { id: string }, request: any, response: any }) => {
-  const product: Product | undefined = products.find(p => p.id === params.id)
+  await getProduct({ params: { "id": params.id }, response })
 
-  if (product) {
-    const body = await request.body()
-    const updateData: { name?: string; description?: string; prince?: number } = body.value
-
-    // loop for products
-    products = products.map(p => p.id === params.id ? { ...p, ...updateData } : p)
-
-    response.status = 200
-    response.body = {
-      success: true,
-      data: products
-    }
-
-  } else {
-    response.status = 404
+  if (response.status === 404) {
     response.body = {
       success: false,
-      msg: 'No product found'
+      msg: response.body.msg
+    }
+    response.status = 404
+    return
+  } else {
+    console.log(response.body.data)
+    const body = await request.body()
+    const product = body.value
+
+    if (!request.hasBody) {
+      response.status = 400
+      response.body = {
+        success: false,
+        msg: 'No data'
+      }
+    } else {
+      try {
+        await client.connect()
+
+        const newData = {...response.body.data, ...product}
+
+        const result = await client.query("UPDATE products SET name=$1, description=$2, price=$3 WHERE id=$4",
+          newData.name,
+          newData.description,
+          newData.price,
+          params.id)
+
+        response.status = 200
+        response.body = {
+          success: true,
+          data: newData
+        }
+      } catch (err) {
+        response.status = 500
+        response.body = {
+          success: false,
+          msg: err.toString()
+        }
+      } finally {
+        await client.end()
+      }
     }
   }
 }
 
 // @desc    Delete product
 // @route   DELETE /api/v1/products/:id
-const deleteProduct = ({ params, response }: { params: { id: string }, response: any }) => {
-  products = products.filter(p => p.id !== params.id)
-  response.body = {
-    success: true,
-    msg: 'Product removed'
+const deleteProduct = async ({ params, response }: { params: { id: string }, response: any }) => {
+  await getProduct({ params: { "id": params.id }, response })
+
+  if (response.status === 404) {
+    response.body = {
+      success: false,
+      msg: response.body.msg
+    }
+    response.status = 404
+    return
+  } else {
+    try {
+      await client.connect()
+
+      const result = await client.query("DELETE FROM products WHERE id=$1", params.id)
+
+      response.body = {
+        success: true,
+        msg: `Product with id ${params.id} has been deleted`
+      }
+      response.status = 204
+    } catch (err) {
+      response.status = 500
+      response.body = {
+        success: false,
+        msg: err.toString()
+      }
+    } finally {
+      await client.end()
+    }
   }
 }
 
